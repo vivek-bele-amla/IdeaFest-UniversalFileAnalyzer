@@ -4,11 +4,6 @@ import json
 
 st.title("Data Generator")
 
-st.markdown("""
-<style>
-    header[data-testid="stHeader"] { display: none; }
-""", unsafe_allow_html=True)
-
 user_input = st.text_area(
     "Enter your prompt here:",
     "Generate JSON data for users with userid, username, email, and password"

@@ -8,7 +8,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 st.markdown("""
 <style>
-    header[data-testid="stHeader"] { display: none; }
     /* Align everything to the left */
     .stApp .block-container { padding-left: 2rem; padding-right: 2rem; }
 </style>

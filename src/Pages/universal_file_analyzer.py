@@ -9,28 +9,7 @@ st.title("Universal File Analyzer")
 
 st.markdown("""
 <style>
-header[data-testid="stHeader"] { display: none; }
-
-/* Download button strip */
-.download-strip {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-}
-.download-strip .stDownloadButton button {
-    padding: 3px 10px;
-    font-size: 11px;
-    height: 26px;
-    min-width: unset;
-    border-radius: 4px;
-    background-color: transparent;
-    border: 1px solid #ccc;
-    color: inherit;
-}
-.download-strip .stDownloadButton button:hover {
-    border-color: #888;
-    background-color: #f0f0f0;
-}
+button[data-testid="stAppDeployButton"] { display: none; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -71,7 +50,7 @@ elif pasted_text.strip():
 
 if df is not None and not df.empty:
     st.write(f"{df.shape[0]} Rows  {df.shape[1]} Columns")
-    st.dataframe(df.reset_index(drop=True).rename(lambda x: x + 1).rename_axis("No."))
+    st.dataframe(df.reset_index(drop=True).rename(lambda x: x + 1).rename_axis("No."), use_container_width=True)
 
     user_prompt = st.text_area(
         "Describe your filter in natural language",
@@ -92,23 +71,16 @@ if df is not None and not df.empty:
         buffer = io.BytesIO()
         filtered_df.to_excel(buffer, index=False, engine="openpyxl")
 
-        # Matching rows left, buttons tightly packed right
-        left, right = st.columns([6, 2])
+        left, right = st.columns([8, 1])
 
         with left:
             st.markdown(f"**Matching rows:** {len(filtered_df)}")
 
         with right:
-            st.markdown('<div class="download-strip">', unsafe_allow_html=True)
-            b1, b2, b3, b4 = st.columns(4)
-            with b1:
-                st.download_button("JSON", filtered_df.to_json(orient="records", indent=2), "filtered.json", key="dl_json")
-            with b2:
-                st.download_button("CSV", filtered_df.to_csv(index=False), "filtered.csv", key="dl_csv")
-            with b3:
-                st.download_button("XLSX", buffer.getvalue(), "filtered.xlsx", key="dl_xlsx")
-            with b4:
-                st.download_button("XML", filtered_df.to_xml(index=False), "filtered.xml", key="dl_xml")
-            st.markdown('</div>', unsafe_allow_html=True)
+            with st.popover("Download"):
+                st.download_button("JSON", filtered_df.to_json(orient="records", indent=2), "filtered.json", key="dl_json", use_container_width=True)
+                st.download_button("CSV",  filtered_df.to_csv(index=False), "filtered.csv", key="dl_csv", use_container_width=True)
+                st.download_button("XLSX", buffer.getvalue(), "filtered.xlsx", key="dl_xlsx", use_container_width=True)
+                st.download_button("XML",  filtered_df.to_xml(index=False), "filtered.xml", key="dl_xml", use_container_width=True)
 
-        st.dataframe(filtered_df.reset_index(drop=True).rename(lambda x: x + 1).rename_axis("No."))
+        st.dataframe(filtered_df.reset_index(drop=True).rename(lambda x: x + 1).rename_axis("No."), height=600, use_container_width=True)

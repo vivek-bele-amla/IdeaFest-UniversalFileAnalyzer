@@ -7,11 +7,6 @@ import re
 st.set_page_config(page_title="File Compare with Copy Button", layout="wide")
 st.title("File Comparer")
 
-st.markdown("""
-<style>
-    header[data-testid="stHeader"] { display: none; }
-""", unsafe_allow_html=True)
-
 # ---- INPUTS ----
 col1, col2 = st.columns(2)
 
