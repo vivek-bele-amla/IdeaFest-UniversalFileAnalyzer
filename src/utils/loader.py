@@ -1,52 +1,65 @@
 import pandas as pd
 import json
+import io
 import xml.etree.ElementTree as ET
 
-def load_file(file):
-    ext = file.name.split(".")[-1].lower()
-    try:
-        if ext in ["xlsx", "xls"]:
-            return pd.read_excel(file)
-        elif ext == "csv":
-            return pd.read_csv(file)
-        elif ext == "json":
-            return load_json(file)
-        elif ext == "xml":
-            return load_xml(file)
-        else:
-            raise ValueError(f"Unsupported file type: {ext}")
-    except Exception as e:
-        print("Error loading file:", e)
-        return None
 
-def load_json(file):
-    content = file.read().decode("utf-8").strip()
-    file.seek(0)
-    records = []
+def load_file(file) -> pd.DataFrame:
+    name = file.name.lower()
+    if name.endswith(".csv"):
+        return pd.read_csv(file)
+    elif name.endswith((".xlsx", ".xls")):
+        return pd.read_excel(file)
+    elif name.endswith(".json"):
+        return _parse_json(file.read().decode("utf-8"))
+    elif name.endswith(".xml"):
+        return _parse_xml(file.read().decode("utf-8"))
+    else:
+        raise ValueError(f"Unsupported file type: {name}")
+
+def _parse_json(text: str) -> pd.DataFrame:
+    text = text.strip()
     try:
-        data = json.loads(content)
+        data = json.loads(text)
+
+        # If it's a dict (single object), wrap or normalize
+        if isinstance(data, dict):
+            # Try to find the first list value (e.g. "lineItems") to use as main table
+            for key, val in data.items():
+                if isinstance(val, dict):
+                    data = val  # unwrap one level e.g. {"order": {...}} → {...}
+                    break
+
+            # Flatten nested object into a single row
+            return pd.json_normalize(data)
+
+        # Flat list of records
         if isinstance(data, list):
-            records.extend(data)
-        elif isinstance(data, dict):
-            records.append(data)
-    except json.JSONDecodeError:
-        # line-delimited JSON
-        for line in content.splitlines():
-            try:
-                records.append(json.loads(line))
-            except:
-                continue
-    if not records:
-        raise ValueError("JSON file is empty or invalid")
-    return pd.json_normalize(records)
+            return pd.json_normalize(data)
 
-def load_xml(file):
-    tree = ET.parse(file)
-    root = tree.getroot()
-    records = []
+    except json.JSONDecodeError:
+        # Newline-delimited JSON (NDJSON)
+        lines = [json.loads(line) for line in text.splitlines() if line.strip()]
+        return pd.json_normalize(lines)
+
+
+def load_text(text: str) -> pd.DataFrame:
+    text = text.strip()
+
+    if text.startswith("{") or text.startswith("["):
+        return _parse_json(text)  # ✅ reuse same logic
+
+    if text.startswith("<"):
+        return _parse_xml(text)
+
+    return pd.read_csv(io.StringIO(text))
+
+
+def _parse_xml(text: str) -> pd.DataFrame:
+    root = ET.fromstring(text)
+    rows = []
     for child in root:
-        record = {elem.tag: elem.text for elem in child}
-        records.append(record)
-    if not records:
-        raise ValueError("XML file is empty or invalid")
-    return pd.DataFrame(records)
+        rows.append({sub.tag: sub.text for sub in child})
+    if not rows:
+        rows = [{sub.tag: sub.text for sub in root}]
+    return pd.DataFrame(rows)
