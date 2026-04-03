@@ -1,162 +1,191 @@
 import os
 import json
-import pandas as pd
 import re
-from groq import Groq
+import pandas as pd
+from openai import OpenAI
 from dotenv import load_dotenv, find_dotenv
 
-dotenv_path = find_dotenv()
-load_dotenv(dotenv_path)
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    raise Exception("GROQ_API_KEY not found in .env!")
+load_dotenv(find_dotenv())
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise EnvironmentError("OPENAI_API_KEY not found in .env")
 
-client = Groq(api_key=GROQ_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# SYSTEM PROMPT 
 SYSTEM_PROMPT = """
-You are an expert assistant that converts natural language requests into strict JSON filter rules.
+You are a data filter assistant. Convert natural language requests into a JSON object for filtering a pandas DataFrame.
 
-Rules:
-- Output must be valid JSON only.
-- Detect logical operators in the user's request:
-  - if user uses "and", "AND", or "&", set "logic": "AND"
-  - if user uses "or", "OR", "|", set "logic": "OR"
-- JSON structure must include:
+OUTPUT SCHEMA:
 {
-  "logic": "<AND/OR>",        
+  "logic": "AND" | "OR",
   "filters": [
     {
-      "column": "<column_name>",
-      "type": "<operation>",
-      "value": <value_if_applicable>
+      "column": "<exact column name from provided list>",
+      "type": "equals" | "not_equals" | "greater_than" | "less_than" | "contains" | "is_null" | "is_not_null",
+      "value": "<comparison value, omit for is_null / is_not_null>"
     }
-  ]
+  ],
+  "columns": ["<col1>", "<col2>"],
+  "column_pattern": {
+    "type": "starts_with" | "contains",
+    "value": "<pattern>"
+  }
 }
-- Allowed types: equals, not equals, contains, greater_than, less_than, is null, is not null
-- Recognize synonyms:
-  - equals, eq, equal → "equals"
-  - not equal, neq, != → "not equals"
-  - greater than, > → "greater_than"
-  - less than, < → "less_than"
-  - contains, includes → "contains"
-- Use only columns provided.
-- Do NOT include explanations, comments, or extra text outside JSON.
+
+RULES:
+1. "logic" controls how multiple filters combine. Default to "AND".
+2. Filter types:
+   - equals / not_equals       → exact match
+   - greater_than / less_than  → numeric comparison
+   - contains                  → substring match
+   - is_null / is_not_null     → presence check (no value needed)
+3. "not null", "has value", "exists", "present" → is_not_null
+4. "null", "missing", "empty"                   → is_null
+5. Column names in BOTH "filters" and "columns" MUST exactly match the provided column list character-for-character, including spaces and casing.
+6. If the user requests specific columns to display → populate "columns".
+7. If the user requests columns by pattern → populate "column_pattern".
+8. If the user states a condition (equals, greater than, is true, less than, etc.) → populate "filters". Do NOT put conditions in "columns".
+9. A request can have BOTH "columns" (display) and "filters" (conditions) at the same time.
+10. Never put column selection logic inside "filters".
+11. If no filters apply → return "filters": []
+
+EXAMPLE:
+Available columns: ["Product Id", "SKU", "Drop Ship Product"]
+User: give me Product Id, SKU and Drop Ship Product columns where Drop Ship Product is true and Product Id less than 1000
+
+Output:
+{
+  "logic": "AND",
+  "filters": [
+    { "column": "Drop Ship Product", "type": "equals", "value": "true" },
+    { "column": "Product Id", "type": "less_than", "value": "1000" }
+  ],
+  "columns": ["Product Id", "SKU", "Drop Ship Product"]
+}
 """
 
-# Utility: Extract JSON
-def extract_json(text):
+NULL_KEYWORDS = {
+    "is_not_null": ["not null", "not empty", "has value", "exists", "present"],
+    "is_null": ["null", "empty", "missing"],
+}
+
+FILTER_OPS = {
+    "equals":       lambda df, col, val: df[col] == val,
+    "not_equals":   lambda df, col, val: df[col] != val,
+    "greater_than": lambda df, col, val: df[col] > val,
+    "less_than":    lambda df, col, val: df[col] < val,
+    "contains":     lambda df, col, val: df[col].astype(str).str.contains(str(val), case=False, na=False),
+    "is_null":      lambda df, col, val: df[col].isna(),
+    "is_not_null":  lambda df, col, val: df[col].notna(),
+}
+
+
+def read_file(file_path: str) -> pd.DataFrame:
+    ext = os.path.splitext(file_path)[1].lower()
+    readers = {".csv": pd.read_csv, ".xlsx": pd.read_excel, ".xls": pd.read_excel, ".json": pd.read_json}
+    if ext not in readers:
+        raise ValueError(f"Unsupported file type: {ext}. Use CSV, Excel, or JSON.")
+    return readers[ext](file_path)
+
+
+def _detect_null_intent(prompt: str) -> str | None:
+    prompt_lower = prompt.lower()
+    for intent, keywords in NULL_KEYWORDS.items():
+        if any(kw in prompt_lower for kw in keywords):
+            return intent
+    return None
+
+
+def _extract_json(text: str) -> dict:
     match = re.search(r'\{.*\}', text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(0))
-        except Exception:
-            return {"logic": "AND", "filters": []}
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
     return {"logic": "AND", "filters": []}
 
 
-# Convert natural language prompt to JSON filters
-def prompt_to_filters(user_prompt, columns, sample_data=None):
-    data_sample_str = json.dumps(sample_data[:10], indent=2) if sample_data else ""
+def prompt_to_filters(user_prompt: str, columns: list, sample_data: list = None) -> dict:
+    null_intent = _detect_null_intent(user_prompt)
 
-    full_prompt = f"Available columns: {columns}\n"
-    if data_sample_str:
-        full_prompt += f"Sample data:\n{data_sample_str}\n"
-    full_prompt += f"User request: {user_prompt}\n"
+    parts = [f"Available columns: {columns}"]
+    if null_intent:
+        parts.append(f"Detected null intent: {null_intent}")
+    if sample_data:
+        parts.append(f"Sample data:\n{json.dumps(sample_data[:10], indent=2)}")
+    parts.append(f"User request: {user_prompt}")
 
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
+    # ✅ Only change: OpenAI Responses API
+    response = client.responses.create(
+        model="gpt-4o-mini",
+        input=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": full_prompt}
+            {"role": "user",   "content": "\n".join(parts)},
         ],
-        temperature=0,
-        max_tokens=500
+        store=False,
     )
 
-    content = response.choices[0].message.content.strip()
-    filters = extract_json(content)
-    return filters
+    result = _extract_json(response.output_text.strip())
 
-def read_file(file_path):
-    if file_path.endswith(".csv"):
-        return pd.read_csv(file_path)
-    elif file_path.endswith(".xlsx") or file_path.endswith(".xls"):
-        return pd.read_excel(file_path)
-    elif file_path.endswith(".json"):
-        return pd.read_json(file_path)
-    else:
-        raise Exception("Unsupported file type. Only CSV, Excel, and JSON are supported.")
+    if null_intent:
+        for f in result.get("filters", []):
+            if f.get("type") in ("is_null", "is_not_null"):
+                f["type"] = null_intent
 
-# Apply filters to DataFrame
-def apply_filters(df, filters_json):
-    df_filtered = df.copy()
-    
-    logic = filters_json.get("logic", "AND").upper()
-    conditions = filters_json.get("filters", [])
-    if not conditions:
-        return df_filtered
+    return result
 
-    # Apply single condition
-    def apply_condition(df, cond):
-        col = cond.get("column")
-        op = cond.get("type")
-        val = cond.get("value")
 
-        if col not in df.columns:
-            return pd.Series([True] * len(df))  # Ignore unknown columns
+def apply_filters(df: pd.DataFrame, ai_json: dict) -> pd.DataFrame:
+    filters = ai_json.get("filters", [])
+    if not filters:
+        return df
 
-        # Convert value type if needed
-        col_dtype = df[col].dtype
-        if pd.api.types.is_numeric_dtype(col_dtype) and isinstance(val, str):
+    logic = ai_json.get("logic", "AND").upper()
+    mask = None
+
+    for f in filters:
+        col, op, val = f.get("column"), f.get("type"), f.get("value")
+        if col not in df.columns or op not in FILTER_OPS:
+            continue
+
+        if op in ("greater_than", "less_than", "equals", "not_equals"):
+            col_dtype = df[col].dtype
             try:
-                val = float(val)
-            except:
+                if pd.api.types.is_integer_dtype(col_dtype):
+                    val = int(val)
+                elif pd.api.types.is_float_dtype(col_dtype):
+                    val = float(val)
+                elif pd.api.types.is_bool_dtype(col_dtype):
+                    val = str(val).strip().lower() == "true"
+            except (ValueError, TypeError):
                 pass
 
-        if op == "equals":
-            return df[col] == val
-        elif op == "not equals":
-            return df[col] != val
-        elif op == "contains":
-            return df[col].astype(str).str.contains(str(val), na=False)
-        elif op == "greater_than":
-            return df[col] > val
-        elif op == "less_than":
-            return df[col] < val
-        elif op == "is null":
-            return df[col].isnull()
-        elif op == "is not null":
-            return df[col].notnull()
-        else:
-            return pd.Series([True] * len(df))  # Ignore unsupported operation
+        condition = FILTER_OPS[op](df, col, val)
+        mask = condition if mask is None else (mask & condition if logic == "AND" else mask | condition)
 
-    # Initialize mask
-    mask = apply_condition(df_filtered, conditions[0])
-    for cond in conditions[1:]:
-        if logic == "AND":
-            mask &= apply_condition(df_filtered, cond)
-        elif logic == "OR":
-            mask |= apply_condition(df_filtered, cond)
+    return df[mask] if mask is not None else df
 
-    return df_filtered[mask]
 
-# function
-def analyze_file_with_nl_filter(file_path, user_prompt):
+def apply_column_selection(df: pd.DataFrame, ai_json: dict) -> pd.DataFrame:
+    if cols := [c for c in ai_json.get("columns", []) if c in df.columns]:
+        return df[cols]
+
+    if cp := ai_json.get("column_pattern"):
+        val = str(cp.get("value") or "").lower()
+        if not val:
+            return df
+        if cp.get("type") == "starts_with":
+            return df[[c for c in df.columns if c.lower().startswith(val)]]
+        if cp.get("type") == "contains":
+            return df[[c for c in df.columns if val in c.lower()]]
+
+    return df
+
+
+def analyze_file(file_path: str, user_prompt: str) -> pd.DataFrame:
     df = read_file(file_path)
-    columns = list(df.columns)
-
-    filters_json = prompt_to_filters(
-        user_prompt,
-        columns,
-        sample_data=df.head(10).to_dict(orient="records")
-    )
-
-    filtered_df = apply_filters(df, filters_json)
-
-    print("JSON Filters Applied:")
-    print(json.dumps(filters_json, indent=2))
-    print("\nFiltered Data:")
-    print(filtered_df)
-
-    return filtered_df
+    ai_json = prompt_to_filters(user_prompt, list(df.columns), df.head(10).to_dict(orient="records"))
+    df = apply_filters(df, ai_json)
+    df = apply_column_selection(df, ai_json)
+    return df
