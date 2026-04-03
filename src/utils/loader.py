@@ -20,26 +20,34 @@ def load_file(file) -> pd.DataFrame:
 def _parse_json(text: str) -> pd.DataFrame:
     text = text.strip()
     try:
-        # Standard JSON array or object
         data = json.loads(text)
+
+        # If it's a dict (single object), wrap or normalize
         if isinstance(data, dict):
-            data = [data]
-        return pd.DataFrame(data)
+            # Try to find the first list value (e.g. "lineItems") to use as main table
+            for key, val in data.items():
+                if isinstance(val, dict):
+                    data = val  # unwrap one level e.g. {"order": {...}} → {...}
+                    break
+
+            # Flatten nested object into a single row
+            return pd.json_normalize(data)
+
+        # Flat list of records
+        if isinstance(data, list):
+            return pd.json_normalize(data)
+
     except json.JSONDecodeError:
-        # Fallback: newline-delimited JSON (NDJSON)
+        # Newline-delimited JSON (NDJSON)
         lines = [json.loads(line) for line in text.splitlines() if line.strip()]
-        return pd.DataFrame(lines)
+        return pd.json_normalize(lines)
 
 
 def load_text(text: str) -> pd.DataFrame:
-    """Auto-detect and parse pasted JSON, CSV, or XML text."""
     text = text.strip()
 
     if text.startswith("{") or text.startswith("["):
-        data = json.loads(text)
-        if isinstance(data, dict):
-            data = [data]
-        return pd.DataFrame(data)
+        return _parse_json(text)  # ✅ reuse same logic
 
     if text.startswith("<"):
         return _parse_xml(text)

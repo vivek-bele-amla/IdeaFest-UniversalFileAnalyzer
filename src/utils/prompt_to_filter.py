@@ -116,7 +116,7 @@ def prompt_to_filters(user_prompt: str, columns: list, sample_data: list = None)
         parts.append(f"Sample data:\n{json.dumps(sample_data[:10], indent=2)}")
     parts.append(f"User request: {user_prompt}")
 
-    # ✅ Only change: OpenAI Responses API
+    # Only change: OpenAI Responses API
     response = client.responses.create(
         model="gpt-4o-mini",
         input=[
