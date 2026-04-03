@@ -16,6 +16,7 @@ Run the following commands to install the required packages:
 python -m pip install streamlit
 python -m pip install python-dotenv
 python -m pip install groq
+python -m pip install openai
 
 ## How to Run
 
